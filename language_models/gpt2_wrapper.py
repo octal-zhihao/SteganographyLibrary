@@ -17,10 +17,12 @@ class GPT2Wrapper(BaseLanguageModel):
     def decode(self, token_ids):
         return self.tokenizer.decode(token_ids)
 
-    def predict_logits(self, input_ids):
+    def predict_logits(self, input_ids: torch.Tensor):
+        input_ids = input_ids.to(self.model.device)
         with torch.no_grad():
-            outputs = self.model(input_ids.to(self.device))
-            return outputs.logits[0, -1]  # shape: [vocab_size]
+            outputs = self.model(input_ids)
+            logits = outputs.logits[0, -1]
+        return logits
 
     def get_vocab_size(self):
         return self.model.config.vocab_size
