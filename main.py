@@ -19,7 +19,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default='gpt2', help='gpt2 / qwen')
+    parser.add_argument('--model', type=str, default='opt', help='gpt2 / qwen / opt')
     parser.add_argument('--text', type=str, required=True)
     args = parser.parse_args()
     main(args)
