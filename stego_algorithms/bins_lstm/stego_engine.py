@@ -1,43 +1,27 @@
-# bins_lstm/stego_engine.py
 import torch
-import random
 
-def embed_bits(model, tokenizer, bins, bit_string, max_len=32, temperature=1.0, top_k=10):
+def embed_bits(lm, tokenizer, bins, bit_string, max_len=32, temperature=1.0, top_k=10):
     tokens = []
-    input_ids = torch.tensor([tokenizer.bos_token_id]).unsqueeze(0).to(model.device)
+    input_ids = torch.tensor([lm.encode(" ")], dtype=torch.long).to(lm.model.device)
 
     for i in range(0, len(bit_string), 2):
         bit_block = bit_string[i:i+2]
         bin_tokens = bins[bit_block]
 
-        outputs = model.gpt(input_ids)
-        last_hidden = outputs.last_hidden_state[:, -1]  # shape: [1, hidden]
-        logits = model.embed_proj(last_hidden).squeeze(0) / temperature
+        logits = lm.predict_logits(input_ids) / temperature
         probs = torch.softmax(logits, dim=-1)
-
-        # 过滤合法 token
         filtered = [(i, probs[i].item()) for i in bin_tokens if i < probs.size(0)]
-        if not filtered:
-            raise ValueError(f"No valid token IDs in bin {bit_block}")
-
-        # 按概率排序，取前 top_k
         filtered.sort(key=lambda x: x[1], reverse=True)
         filtered = filtered[:top_k]
         ids, values = zip(*filtered)
-        values = torch.tensor(values)
-        dist = torch.distributions.Categorical(probs=values)
-        sampled_idx = dist.sample().item()
-        next_token_id = ids[sampled_idx]
+        dist = torch.distributions.Categorical(probs=torch.tensor(values))
+        next_token = ids[dist.sample().item()]
 
-        tokens.append(next_token_id)
-        input_ids = torch.cat([input_ids, torch.tensor([[next_token_id]]).to(model.device)], dim=1)
-
-        if len(tokens) >= max_len:
-            break
+        tokens.append(next_token)
+        input_ids = torch.cat([input_ids, torch.tensor([[next_token]]).to(lm.model.device)], dim=1)
+        if len(tokens) >= max_len: break
 
     return tokenizer.decode(tokens)
-
-
 
 def decode_bits(text, bins, tokenizer):
     ids = tokenizer(text)["input_ids"]
