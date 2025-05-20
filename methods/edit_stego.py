@@ -51,7 +51,7 @@ class EditStego(StegoMethod):
         print(f'[DEBUG] message bits: {len(bits)}, embedded positions: {embedded_positions}')
         return stego
 
-    def decrypt(self, stego_text: str) -> ByteString:
+    def decrypt(self, cover: str, stego_text: str) -> ByteString:
         message_bits = []
 
         # Tokenize 并做同样的掩码
