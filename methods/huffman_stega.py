@@ -31,26 +31,27 @@ class HuffmanStega(StegoMethod):
         L      = len(bitstr)
         i      = 0
 
-        # 2. 通过 encode 得到 cover_ids，并预热 past
+        # 2. 用 cover 预热 past（仅用于内部上下文）
         cover_ids = self.tokenizer.encode(cover, return_tensors='pt')[0].to(self.device)
         with torch.no_grad():
             out  = self.model(cover_ids.unsqueeze(0), use_cache=True)
             past = limit_past(out.past_key_values, max_length=self.model.config.n_positions-1)
         last_id = cover_ids[-1].view(1, 1)
 
-        # 3. 隐写生成阶段
+        # 3. 隐写生成：仅保存 suffix_ids
         suffix_ids: List[int] = []
         with torch.no_grad():
+            # 嵌入比特
             while i < L:
                 out    = self.model(last_id, past_key_values=past, use_cache=True)
                 logits = out.logits[0, -1]
                 past   = limit_past(out.past_key_values, max_length=self.model.config.n_positions-1)
 
-                # 拿更多几个 top 以便过滤
+                # 取更多候选以便过滤
                 top_logits, top_ids = logits.topk(self.top_m * 2)
                 top_probs = F.softmax(top_logits, dim=-1)
 
-                # 过滤低价值标点，取最初 top_m
+                # 过滤低价值标点，取前 top_m
                 candidates: List[int] = []
                 for tid in top_ids.tolist():
                     tok = self.tokenizer.convert_ids_to_tokens(tid)
@@ -59,37 +60,31 @@ class HuffmanStega(StegoMethod):
                     candidates.append(tid)
                     if len(candidates) >= self.top_m:
                         break
-
-                # 若不足，则回退至不过滤
                 if len(candidates) < 2:
                     candidates = top_ids[:self.top_m].tolist()
 
-                # 选择 token
+                # 按 flc/vlc 选词
                 if self.encoding_method == 'flc':
                     chunk    = bitstr[i : i + self.k].ljust(self.k, '0')
                     idx      = int(chunk, 2)
                     token_id = candidates[idx]
                     i       += self.k
-                else:  # vlc
+                else:
                     probs = top_probs[:len(candidates)].cpu().numpy()
-                    h = HuffmanCoding()
-                    h.make_heap_from_array(probs)
-                    h.merge_nodes()
-                    root = h.make_codes()
-                    node = root
+                    h = HuffmanCoding(); h.make_heap_from_array(probs); h.merge_nodes()
+                    root = h.make_codes(); node = root
                     while node.token is None and i < L:
-                        node = node.right if bitstr[i] == '1' else node.left
+                        node = node.right if bitstr[i]=='1' else node.left
                         i += 1
                         if node is None:
-                            node = root
-                            break
+                            node = root; break
                     rank     = node.token or 0
                     token_id = candidates[rank]
 
                 suffix_ids.append(token_id)
                 last_id = torch.tensor([[token_id]], device=self.device)
 
-            # 4. 补齐当前句子：贪心生成到句尾
+            # 补齐当前句子直到遇到句尾符号
             while True:
                 out    = self.model(last_id, past_key_values=past, use_cache=True)
                 logits = out.logits[0, -1]
@@ -101,27 +96,21 @@ class HuffmanStega(StegoMethod):
                 if tok in {'.', '!', '?'}:
                     break
 
-        # 5. 合并 cover + suffix 并 decode 返回
-        full_ids = torch.cat([
-            cover_ids,
-            torch.tensor(suffix_ids, device=self.device)
-        ])
-        return self.tokenizer.decode(full_ids.tolist(), skip_special_tokens=True)
+        # 4. 只 decode suffix 返回，不保留 cover
+        return self.tokenizer.decode(suffix_ids, skip_special_tokens=True)
 
     def decrypt(self, cover: str, stego_text: str) -> ByteString:
-        # 1. 用 encode 切分出 suffix_ids
-        cover_ids = self.tokenizer.encode(cover)
-        stego_ids = self.tokenizer.encode(stego_text)
-        suffix_ids = stego_ids[len(cover_ids):]
+        # 1. stego_text 全部当作 suffix_ids
+        suffix_ids = self.tokenizer.encode(stego_text, add_special_tokens=False)
 
-        # 2. 重新预热 cover
-        ids_tensor = torch.tensor(cover_ids, device=self.device).unsqueeze(0)
+        # 2. 用 cover 预热 past
+        cover_ids  = self.tokenizer.encode(cover, return_tensors='pt')[0].to(self.device)
         with torch.no_grad():
-            out  = self.model(ids_tensor, use_cache=True)
+            out  = self.model(cover_ids.unsqueeze(0), use_cache=True)
             past = limit_past(out.past_key_values, max_length=self.model.config.n_positions-1)
-        last_id = torch.tensor([[cover_ids[-1]]], device=self.device)
+        last_id = cover_ids[-1].view(1, 1)
 
-        # 3. 提取比特
+        # 3. 逐词提取
         bits: List[str] = []
         with torch.no_grad():
             for tid in suffix_ids:
@@ -129,10 +118,10 @@ class HuffmanStega(StegoMethod):
                 logits = out.logits[0, -1]
                 past   = limit_past(out.past_key_values, max_length=self.model.config.n_positions-1)
 
-                # 同样过滤标点
                 top_logits, top_ids = logits.topk(self.top_m * 2)
                 top_probs = F.softmax(top_logits, dim=-1)
 
+                # 重复过滤逻辑
                 candidates: List[int] = []
                 for cand in top_ids.tolist():
                     tok = self.tokenizer.convert_ids_to_tokens(cand)
@@ -144,27 +133,23 @@ class HuffmanStega(StegoMethod):
                 if len(candidates) < 2:
                     candidates = top_ids[:self.top_m].tolist()
 
-                top_list = candidates
-
-                if tid not in top_list:
+                if tid not in candidates:
                     break
-                rank = top_list.index(tid)
+                rank = candidates.index(tid)
 
                 if self.encoding_method == 'flc':
                     bits.append(format(rank, f'0{self.k}b'))
                 else:
-                    probs = F.softmax(top_logits[:len(candidates)], dim=-1)[:len(candidates)].cpu().numpy()
-                    h = HuffmanCoding()
-                    h.make_heap_from_array(probs)
-                    h.merge_nodes()
+                    probs = top_probs[:len(candidates)].cpu().numpy()
+                    h = HuffmanCoding(); h.make_heap_from_array(probs); h.merge_nodes()
                     _ = h.make_codes()
                     bits.append(h.codes[rank])
 
                 last_id = torch.tensor([[tid]], device=self.device)
 
-        # 4. 拼接比特串并转 bytes
+        # 4. 拼接比特并转 bytes
         bitstr = ''.join(bits)
-        valid  = (len(bitstr) // 8) * 8
+        valid  = (len(bitstr)//8)*8
         bitstr = bitstr[:valid]
         if not bitstr:
             return b''
