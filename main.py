@@ -8,7 +8,7 @@ from methods.discop_stego import DiscopStego
 def main():
     parser = argparse.ArgumentParser(description='文本隐写加密/解密工具')
     parser.add_argument('--action', default='encrypt', choices=['encrypt','decrypt'], help='选择操作：encrypt 加密；decrypt 解密')
-    parser.add_argument('--method', default='huffman', choices=['edit','lstm','huffman','neural','discop'], help='隐写方法')
+    parser.add_argument('--method', default='lstm', choices=['edit','lstm','huffman','neural','discop'], help='隐写方法')
     parser.add_argument('--model', default='gpt2', help='HuggingFace 模型名')
     parser.add_argument('--cover', default='cover.txt', help='载体文本文件路径 (encrypt 时必填)')
     parser.add_argument('--stego', default='stego.txt', help='隐写文本文件路径 (decrypt 时必填)')
