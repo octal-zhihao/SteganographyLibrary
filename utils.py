@@ -85,10 +85,7 @@ def entropy(q, logq):
 
 # e.g. [0, 1, 1, 1] looks like 1110=14
 def bits2int(bits):
-    res = 0
-    for i, bit in enumerate(bits):
-        res += bit*(2**i)
-    return res
+    return int(''.join(str(b) for b in bits), 2)
 
 def int2bits(inp, num_bits):
     if num_bits == 0:

@@ -24,8 +24,8 @@ def main():
     parser.add_argument('--bits_per_word', type=int, default=2, help='每个字符的比特数 (仅 rnn_stega 有效)')
     parser.add_argument('--encoding_method', default='vlc', choices=['flc','vlc'], help='编码方法 (仅 rnn_stega 有效)')
     # neural_stego 特有参数
-    parser.add_argument('--top_k', type=int, default=300, help='top-k 采样 (仅 neural_stego 有效)')
-    parser.add_argument('--temperature', type=float, default=0.9, help='温度 (仅 neural_stego 有效)')
+    parser.add_argument('--top_k', type=int, default=1024, help='top-k 采样 (仅 neural_stego 有效)')
+    parser.add_argument('--temperature', type=float, default=1.0, help='温度 (仅 neural_stego 有效)')
     args = parser.parse_args()
     # 实例化对应方法类
     cls_map = {

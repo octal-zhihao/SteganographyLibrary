@@ -1,5 +1,3 @@
-# methods/huffman_stega.py
-
 import torch
 import torch.nn.functional as F
 from typing import ByteString, List

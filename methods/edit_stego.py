@@ -86,13 +86,10 @@ class EditStego(StegoMethod):
         length = len(ids)
         count = 0
         for i, tok in enumerate(tokens):
-            # 跳过子词
             if i + 1 < length and tok.startswith('##'):
                 continue
-            # 跳过停用词与非字母
             if tok.lower() in self.stopwords or not tok.isalpha():
                 continue
-            # 每隔 mask_interval 掩码一次
             if count % self.mask_interval == 0:
                 ids[i] = self.tokenizer.mask_token_id
             count += 1

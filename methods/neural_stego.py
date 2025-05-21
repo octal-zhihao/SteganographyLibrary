@@ -1,210 +1,198 @@
-# methods/neural_stego.py
-
 import torch
 import torch.nn.functional as F
 from typing import ByteString, List
-from utils import StegoMethod, load_causal_lm, limit_past, num_same_from_beg, bits2int, int2bits
+
+from utils import StegoMethod, load_causal_lm, limit_past
 
 
-def encode_arithmetic(model, enc, message_bits: List[int], context: List[int],
-                      finish_sent: bool = False, device: str = 'cpu',
-                      temp: float = 1.0, precision: int = 16, topk: int = 50000):
+def encode_arithmetic_fp(
+    model, enc,
+    message_bits: List[int],
+    context_ids: List[int],
+    device: str,
+    temp: float,
+    topk: int
+) -> List[int]:
     """
-    将 message_bits （0/1 列表）嵌入由 context 预热的模型中，返回生成的 token id 列表。
+    极简浮点算术编码：只为每个 bit 生成一个 token，1-to-1 映射，不做句末补齐。
     """
     device = torch.device(device)
-    context = torch.tensor(context[-1022:], device=device)
-    max_val = 2**precision
-    cur_interval = [0, max_val]
-    prev = context
+    # 1. 预热 context
+    prev_ids = torch.tensor(context_ids[-1022:], device=device).unsqueeze(0)
     past = None
-    output = []
 
-    i = 0
-    sent_finish = False
-    while i < len(message_bits) or (finish_sent and not sent_finish):
-        out = model(prev.unsqueeze(0), past_key_values=past, use_cache=True)
-        logits = out.logits[0, -1].double()
-        past = limit_past(out.past_key_values)
+    out_ids: List[int] = []
+    low, high = 0.0, 1.0
+    bit_ptr = 0
+    total_bits = len(message_bits)
 
-        # 屏蔽特殊 token
-        logits[-1] = -1e20
+    with torch.no_grad():
+        while bit_ptr < total_bits:
+            outputs = model(prev_ids, past_key_values=past, use_cache=True)
+            logits = outputs.logits[0, -1]       # [vocab_size]
+            past = limit_past(outputs.past_key_values)
 
-        # 排序取 topk
-        logits_sorted, indices = logits.sort(descending=True)
-        logits_temp = logits_sorted / temp
-        probs_temp = F.softmax(logits_temp, dim=0)
+            # 屏蔽 eos
+            logits[..., -1] = -1e9
 
-        # 计算当前区间长度与阈值
-        cur_range = cur_interval[1] - cur_interval[0]
-        threshold = 1 / cur_range
-        k = min(max(2, (probs_temp < threshold).nonzero()[0].item()), topk)
-        p_trunc = probs_temp[:k]
-        p_trunc = (p_trunc / p_trunc.sum() * cur_range).round().long()
-        cum = torch.cumsum(p_trunc, dim=0) + cur_interval[0]
+            # 拿 topk
+            top_logits, top_ids = logits.topk(topk)
+            probs = F.softmax(top_logits / temp, dim=-1).cpu().numpy()
+            top_ids = top_ids.cpu().numpy()
 
-        # 选择 message_bits 对应的 index
-        bits_chunk = message_bits[i:i+precision]
-        if len(bits_chunk) < precision:
-            bits_chunk += [0] * (precision - len(bits_chunk))
-        msg_idx = bits2int(list(reversed(bits_chunk)))
-        selection = (cum > msg_idx).nonzero()[0].item()
+            # 构造累积概率 [0,1]
+            cum = probs.cumsum()
+            cum = cum / cum[-1]
 
-        # 更新区间
-        low = cum[selection-1].item() if selection > 0 else cur_interval[0]
-        high = cum[selection].item()
-        # 提取已固定的前缀位数
-        low_bits = list(reversed(int2bits(low, precision)))
-        high_bits = list(reversed(int2bits(high-1, precision)))
-        nb = num_same_from_beg(low_bits, high_bits)
-        i += nb
-        # 生成 new interval
-        new_low = bits2int(list(reversed(low_bits[nb:] + [0]*nb)))
-        new_high = bits2int(list(reversed(high_bits[nb:] + [1]*nb))) + 1
-        cur_interval = [new_low, new_high]
+            # 消耗一个 bit：二分 [low,high)
+            b = message_bits[bit_ptr]
+            mid = (low + high) / 2
+            if b == 0:
+                high = mid
+            else:
+                low = mid
+            bit_ptr += 1
 
-        # 选定 token
-        tok_id = indices[selection].item()
-        output.append(tok_id)
+            # 选 token：找到第一个 cum > low
+            idx = int((cum > low).argmax())
+            tok = int(top_ids[idx])
 
-        prev = torch.tensor([tok_id], device=device)
-        # 提前结束句子
-        if finish_sent:
-            text = enc.decode(output)
-            if '<eos>' in text:
+            out_ids.append(tok)
+            prev_ids = torch.tensor([[tok]], device=device)
+
+    return out_ids
+
+
+def decode_arithmetic_fp(
+    model, enc,
+    stego_ids: List[int],
+    context_ids: List[int],
+    total_bits: int,
+    device: str,
+    temp: float,
+    topk: int
+) -> List[int]:
+    """
+    极简浮点解码：重走 encode 时的逻辑，为了每个 token 反推一个 bit。
+    """
+    device = torch.device(device)
+    prev_ids = torch.tensor(context_ids[-1022:], device=device).unsqueeze(0)
+    past = None
+
+    low, high = 0.0, 1.0
+    recovered: List[int] = []
+
+    with torch.no_grad():
+        for tok in stego_ids:
+            if len(recovered) >= total_bits:
                 break
 
-    return output
+            outputs = model(prev_ids, past_key_values=past, use_cache=True)
+            logits = outputs.logits[0, -1]
+            past = limit_past(outputs.past_key_values)
 
-def decode_arithmetic(model, enc, text: str, context: List[int],
-                      device: str = 'cpu', temp: float = 1.0,
-                      precision: int = 16, topk: int = 50000) -> List[int]:
-    """
-    从 stego 文本中逐 token 解码，返回恢复的 message_bits 列表。
-    """
-    device = torch.device(device)
-    inp = enc.encode(text)
-    # 处理 BPE 小错误（同官方）
-    i = 0
-    while i < len(inp):
-        if inp[i] == 628:
-            inp[i] = 198
-            inp[i+1:i+1] = [198]
-            i += 2
-        else:
-            i += 1
+            logits[..., -1] = -1e9
+            top_logits, top_ids = logits.topk(topk)
+            probs = F.softmax(top_logits / temp, dim=-1).cpu().numpy()
+            top_ids = top_ids.cpu().numpy()
 
-    context = torch.tensor(context[-1022:], device=device)
-    cur_interval = [0, 2**precision]
-    prev = context
-    past = None
-    message: List[int] = []
+            cum = probs.cumsum()
+            cum = cum / cum[-1]
 
-    i = 0
-    for tok in inp:
-        out = model(prev.unsqueeze(0), past_key_values=past, use_cache=True)
-        logits = out.logits[0, -1].double()
-        past = limit_past(out.past_key_values)
-        logits[-1] = -1e20
+            # 找到 tok 在 top_ids 中的位置
+            ranks = (top_ids == tok).nonzero()
+            if len(ranks) == 0:
+                # 一旦遇到不在 topk 的 token，就中断
+                break
+            idx = int(ranks[0])
 
-        logits_sorted, indices = logits.sort(descending=True)
-        logits_temp = logits_sorted / temp
-        probs_temp = F.softmax(logits_temp, dim=0)
+            # cum[idx] 是 token 在 [0,1) 的上界
+            # 二分区间 mid
+            mid = (low + high) / 2
+            # 如果 cum[idx] ≤ mid，说明它落在左半区 => bit=0，否则 bit=1
+            bit = 0 if cum[idx] <= mid else 1
+            recovered.append(bit)
 
-        cur_range = cur_interval[1] - cur_interval[0]
-        threshold = 1 / cur_range
-        k = min(max(2, (probs_temp < threshold).nonzero()[0].item()), topk)
-        p_trunc = probs_temp[:k]
-        p_trunc = (p_trunc / p_trunc.sum() * cur_range).round().long()
-        cum = torch.cumsum(p_trunc, dim=0) + cur_interval[0]
+            # 更新浮点区间
+            if bit == 0:
+                high = mid
+            else:
+                low = mid
 
-        # 找到 tok 在 indices 中的位置
-        rank = (indices[:k] == tok).nonzero()
-        if len(rank) == 0:
-            break
-        rank = rank[0].item()
+            prev_ids = torch.tensor([[tok]], device=device)
 
-        low = cum[rank-1].item() if rank>0 else cur_interval[0]
-        high = cum[rank].item()
-        low_bits = list(reversed(int2bits(low, precision)))
-        high_bits = list(reversed(int2bits(high-1, precision)))
-        nb = num_same_from_beg(low_bits, high_bits)
-        # 提取这段共享位
-        bits = high_bits[:nb]
-        message += bits
-
-        new_low = bits2int(list(reversed(low_bits[nb:] + [0]*nb)))
-        new_high = bits2int(list(reversed(high_bits[nb:] + [1]*nb))) + 1
-        cur_interval = [new_low, new_high]
-
-        prev = torch.tensor([tok], device=device)
-        i += 1
-
-    return message
+    return recovered
 
 
 class NeuralStego(StegoMethod):
-    def __init__(
-        self,
-        model_name: str = 'gpt2',
-        temp: float = 1.0,
-        precision: int = 16,
-        topk: int = 50000,
-        device: str = 'cpu'
-    ):
+    def __init__(self,
+                 model_name: str = 'gpt2',
+                 temp: float = 1.0,
+                 topk: int = 512,
+                 device: str = 'cpu'):
         """
-        基于算术编码的神经语言隐写
-        temp: softmax 温度
-        precision: 算术编码精度（bit-length）
-        topk: 采样时截断到 topk 个 token
+        极简浮点算术隐写：1bit→1token，不做句末补齐。
         """
         self.tokenizer, self.model = load_causal_lm(model_name)
         self.temp = temp
-        self.precision = precision
         self.topk = topk
         self.device = device
         self.model.to(device)
 
     def encrypt(self, cover: str, payload: ByteString) -> str:
-        # 1. 构造消息 bit 列表，加入 32-bit header
-        msg = payload.decode('utf-8', errors='ignore')
-        msg_bits = [int(b) for b in ''.join(f"{ord(c):016b}" for c in msg)]
-        header = [int(b) for b in format(len(msg_bits), '032b')]
-        full_bits = header + msg_bits
+        # bits 列表（8bit per byte）+ 32bit header
+        bits: List[int] = []
+        for b in payload:
+            bits.extend(int(x) for x in format(b, '08b'))
+        header = [int(x) for x in format(len(bits), '032b')]
+        full_bits = header + bits
 
-        # 2. 准备 context
-        cover_ids = self.tokenizer.encode(cover, add_special_tokens=False)
-        # 3. arithmetic encode → token ids
-        stego_ids = encode_arithmetic(
-            self.model, self.tokenizer, full_bits, cover_ids,
-            finish_sent=True,
+        # 预热 context
+        context_ids = self.tokenizer.encode(cover, add_special_tokens=False)
+
+        # 算术编码
+        stego_ids = encode_arithmetic_fp(
+            self.model, self.tokenizer,
+            full_bits, context_ids,
             device=self.device,
             temp=self.temp,
-            precision=self.precision,
             topk=self.topk
         )
-        # 4. decode 返回文本
+
+        # 只输出隐写段
         return self.tokenizer.decode(stego_ids, skip_special_tokens=True)
 
     def decrypt(self, cover: str, stego_text: str) -> ByteString:
-        # 1. split context
-        cover_ids = self.tokenizer.encode(cover, add_special_tokens=False)
-        # 2. arithmetic decode → bit 列表
-        bits = decode_arithmetic(
+        # 预热 context 与隐写 ids
+        context_ids = self.tokenizer.encode(cover, add_special_tokens=False)
+        stego_ids   = self.tokenizer.encode(stego_text, add_special_tokens=False)
+
+        # 先解 header（32 bit）
+        header_bits = decode_arithmetic_fp(
             self.model, self.tokenizer,
-            stego_text, cover_ids,
+            stego_ids, context_ids,
+            total_bits=32,
             device=self.device,
             temp=self.temp,
-            precision=self.precision,
             topk=self.topk
         )
-        # 3. 取前 32-bit 作为长度，再恢复消息
-        header = bits[:32]
-        length = bits2int(header)
-        payload_bits = bits[32:32+length]
-        # 4. 按 16-bit 一组还原字符
-        chars = []
-        for i in range(0, len(payload_bits), 16):
-            val = bits2int(payload_bits[i:i+16])
-            chars.append(chr(val))
-        return ''.join(chars).encode('utf-8')
+        length = int(''.join(str(b) for b in header_bits), 2)
+
+        # 再解后续 payload bits
+        payload_bits = decode_arithmetic_fp(
+            self.model, self.tokenizer,
+            stego_ids, context_ids,
+            total_bits=32 + length,
+            device=self.device,
+            temp=self.temp,
+            topk=self.topk
+        )[32:]
+
+        # 重建 bytes
+        out = bytearray()
+        for i in range(0, len(payload_bits), 8):
+            chunk = payload_bits[i:i+8]
+            if len(chunk) < 8:
+                chunk += [0]*(8-len(chunk))
+            out.append(int(''.join(str(b) for b in chunk), 2))
+        return bytes(out)
