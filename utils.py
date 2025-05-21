@@ -72,3 +72,38 @@ def limit_past(past_key_values, max_length: Optional[int] = None):
             value = value[..., -max_len:, :].contiguous()
         truncated.append((key, value))
     return tuple(truncated)
+
+def kl(q, logq, logp):
+    res = q*(logq-logp)/0.69315
+    res[q==0] = 0
+    return res.sum().item() # in bits
+
+def entropy(q, logq):
+    res = q*logq/0.69315
+    res[q==0] = 0
+    return -res.sum().item() # in bits
+
+# e.g. [0, 1, 1, 1] looks like 1110=14
+def bits2int(bits):
+    res = 0
+    for i, bit in enumerate(bits):
+        res += bit*(2**i)
+    return res
+
+def int2bits(inp, num_bits):
+    if num_bits == 0:
+        return []
+    strlist = ('{0:0%db}'%num_bits).format(inp)
+    return [int(strval) for strval in reversed(strlist)]
+
+def is_sent_finish(token_idx, enc):
+    token = enc.decoder[token_idx]
+    return '.' in token or '!' in token or '?' in token
+
+def num_same_from_beg(bits1, bits2):
+    assert len(bits1) == len(bits2)
+    for i in range(len(bits1)):
+        if bits1[i] != bits2[i]:
+            break
+
+    return i
