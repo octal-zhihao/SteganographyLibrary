@@ -9,7 +9,7 @@ class HuffmanStega(StegoMethod):
         self,
         model_name: str      = 'gpt2',
         bits_per_word: int   = 2,
-        encoding_method: str = 'flc',
+        encoding_method: str = 'vlc',
         device: str          = 'cpu'
     ):
         """
@@ -24,19 +24,19 @@ class HuffmanStega(StegoMethod):
         self.model.to(self.device)
 
     def encrypt(self, cover: str, payload: ByteString) -> str:
-        # 1. 构造 bit 流
+        # 构造 bit 流
         bitstr = ''.join(f"{b:08b}" for b in payload)
-        L      = len(bitstr)
-        i      = 0
+        L = len(bitstr)
+        i = 0
 
-        # 2. 用 cover 预热 past（仅用于内部上下文）
+        # 用 cover 预热 past（仅用于内部上下文）
         cover_ids = self.tokenizer.encode(cover, return_tensors='pt')[0].to(self.device)
         with torch.no_grad():
             out  = self.model(cover_ids.unsqueeze(0), use_cache=True)
             past = limit_past(out.past_key_values, max_length=self.model.config.n_positions-1)
         last_id = cover_ids[-1].view(1, 1)
 
-        # 3. 隐写生成：仅保存 suffix_ids
+        # 隐写生成：仅保存 suffix_ids
         suffix_ids: List[int] = []
         with torch.no_grad():
             # 嵌入比特
@@ -94,21 +94,21 @@ class HuffmanStega(StegoMethod):
                 if tok in {'.', '!', '?'}:
                     break
 
-        # 4. 只 decode suffix 返回，不保留 cover
+        # 只 decode suffix 返回，不保留 cover
         return self.tokenizer.decode(suffix_ids, skip_special_tokens=True)
 
     def decrypt(self, cover: str, stego_text: str) -> ByteString:
-        # 1. stego_text 全部当作 suffix_ids
+        # stego_text 全部当作 suffix_ids
         suffix_ids = self.tokenizer.encode(stego_text, add_special_tokens=False)
 
-        # 2. 用 cover 预热 past
+        # 用 cover 预热 past
         cover_ids  = self.tokenizer.encode(cover, return_tensors='pt')[0].to(self.device)
         with torch.no_grad():
             out  = self.model(cover_ids.unsqueeze(0), use_cache=True)
             past = limit_past(out.past_key_values, max_length=self.model.config.n_positions-1)
         last_id = cover_ids[-1].view(1, 1)
 
-        # 3. 逐词提取
+        # 逐词提取
         bits: List[str] = []
         with torch.no_grad():
             for tid in suffix_ids:
@@ -145,7 +145,7 @@ class HuffmanStega(StegoMethod):
 
                 last_id = torch.tensor([[tid]], device=self.device)
 
-        # 4. 拼接比特并转 bytes
+        # 拼接比特并转 bytes
         bitstr = ''.join(bits)
         valid  = (len(bitstr)//8)*8
         bitstr = bitstr[:valid]

@@ -50,8 +50,8 @@ class LSTMStego(StegoMethod):
         cover_ids = self.tokenizer.encode(cover, return_tensors='pt')[0].to(self.device)
         with torch.no_grad():
             out = self.model(cover_ids.unsqueeze(0), use_cache=True)
-        past    = limit_past(out.past_key_values,
-                             max_length=self.model.config.n_positions-1)
+        past = limit_past(out.past_key_values,
+                          max_length=self.model.config.n_positions-1)
         last_id = cover_ids[-1].view(1,1)
 
         # 3. 增量生成每块
@@ -64,7 +64,7 @@ class LSTMStego(StegoMethod):
                 # 增量调用
                 out = self.model(last_id, past_key_values=past, use_cache=True)
                 logits = out.logits[0, -1]  # shape [vocab]
-                past   = limit_past(out.past_key_values,
+                past = limit_past(out.past_key_values,
                                   max_length=self.model.config.n_positions-1)
 
                 # 掩码不在桶的
@@ -79,18 +79,17 @@ class LSTMStego(StegoMethod):
         return self.tokenizer.decode(suffix_ids, skip_special_tokens=True)
 
     def decrypt(self, cover: str, stego_text: str) -> ByteString:
-        # 1. 切分续写部分
         cover_ids = self.tokenizer.encode(cover)
         stego_ids = self.tokenizer.encode(stego_text)
-        suffix_ids = stego_ids  # stego_text 本身就是续写
+        suffix_ids = stego_ids
 
         # 2. 预热 cover
         if cover_ids:
             ids_tensor = torch.tensor(cover_ids, device=self.device).unsqueeze(0)
             with torch.no_grad():
                 out = self.model(ids_tensor, use_cache=True)
-            past    = limit_past(out.past_key_values,
-                                 max_length=self.model.config.n_positions-1)
+            past = limit_past(out.past_key_values,
+                              max_length=self.model.config.n_positions-1)
             last_id = torch.tensor([[cover_ids[-1]]], device=self.device)
         else:
             past = None
@@ -103,7 +102,7 @@ class LSTMStego(StegoMethod):
             for tid in suffix_ids:
                 out = self.model(last_id, past_key_values=past, use_cache=True)
                 logits = out.logits[0, -1]
-                past   = limit_past(out.past_key_values,
+                past = limit_past(out.past_key_values,
                                   max_length=self.model.config.n_positions-1)
                 # 直接用 id2bits
                 bits.append(self.id2bits.get(tid, ''))
